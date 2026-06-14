@@ -253,7 +253,6 @@ fn collect_module_files() -> Result<Option<Node>> {
             if !dir_entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
                 continue;
             }
-            let dir_name = dir_entry.file_name();
             let dir_name_os = dir_entry.file_name();
             let Some(dir_str) = dir_name_os.to_str() else { continue };
 
@@ -784,6 +783,56 @@ fn do_overlayfs_mount() -> Result<()> {
 // ─────────────────────────────────────────────────────────────
 // Public entry points
 // ─────────────────────────────────────────────────────────────
+
+/// Unmount all overlayfs mounts created by us.
+/// Called when switching mount modes or during module cleanup.
+pub fn unmount_all() -> Result<()> {
+    let mode = MountMode::detect();
+    match mode {
+        MountMode::OverlayFs => unmount_overlayfs(),
+        MountMode::Magic => {
+            // Magic Mount uses bind mounts + tmpfs — they are cleaned up
+            // when the tmpfs workdir is unmounted (handled in magic_mount())
+            log::info!("Magic Mount: no explicit unmount needed");
+            Ok(())
+        }
+    }
+}
+
+/// Unmount overlayfs for all partitions we mounted.
+fn unmount_overlayfs() -> Result<()> {
+    let work_base = PathBuf::from(OVERLAYFS_WORK_DIR);
+    if !work_base.exists() {
+        log::info!("overlayfs: work dir doesn't exist, nothing to unmount");
+        return Ok(());
+    }
+
+    // Find all partitions we mounted by checking for .overlayfs_mounted markers
+    for entry in work_base.read_dir()?.flatten() {
+        if !entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let partition_name = entry.file_name();
+        let Some(name) = partition_name.to_str() else { continue };
+        let target = Path::new("/").join(name);
+        let marker = target.join(".overlayfs_mounted");
+
+        if marker.exists() {
+            log::info!("overlayfs: unmounting {}", name);
+            if let Err(e) = unmount(&target, UnmountFlags::DETACH) {
+                log::error!("overlayfs: failed to unmount {}: {}", name, e);
+            } else {
+                // Remove marker
+                fs::remove_file(&marker).ok();
+                log::info!("overlayfs: {} unmounted successfully", name);
+            }
+        }
+    }
+
+    // Clean up work directory
+    fs::remove_dir_all(&work_base).ok();
+    Ok(())
+}
 
 /// Main mount dispatcher. Detects mode from flag files and calls appropriate implementation.
 pub fn mount_modules() -> Result<()> {

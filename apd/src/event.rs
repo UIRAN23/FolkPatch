@@ -282,6 +282,11 @@ pub fn on_post_data_fs(superkey: Option<String>) -> Result<()> {
     if module::load_sepolicy_rule().is_err() {
         warn!("load sepolicy.rule failed");
     }
+    // Unmount previous mounts before applying new mode
+    if let Err(e) = crate::magic_mount::unmount_all() {
+        log::error!("unmount previous mounts failed: {e}");
+    }
+
     // Mount mode priority:
     // 1. OverlayFS flag (.overlayfs_mount_enable) → OverlayFS
     // 2. Magic Mount flag (.magic_mount_enable) → Magic Mount (bind + tmpfs)
