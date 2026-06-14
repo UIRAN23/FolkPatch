@@ -478,8 +478,12 @@
     <string name="dpi_confirm_message">Изменить DPI приложения с %1$s на %2$s?</string>
     <string name="settings_alt_icon">Альтернативная иконка</string>
     <string name="alt_icon_summary">Использовать альтернативный значок запуска</string>
-    <string name="settings_magic_mount">Folk Mount API</string>
-    <string name="settings_magic_mount_summary">Включить встроенную систему монтирования модулей</string>
+    <string name="settings_magic_mount">Монтирование модулей</string>
+    <string name="settings_magic_mount_summary">Выберите способ монтирования модулей</string>
+    <string name="settings_mount_mode">Режим монтирования</string>
+    <string name="settings_mount_mode_magic">Magic Mount</string>
+    <string name="settings_mount_mode_overlayfs">OverlayFS</string>
+    <string name="settings_mount_mode_disabled">Выключено</string>
     <string name="settings_new_app_profile_mode">Режим по умолчанию для новых приложений</string>
     <string name="settings_new_app_profile_normal">БЕЗ ROOT</string>
     <string name="settings_new_app_profile_root">ROOT</string>

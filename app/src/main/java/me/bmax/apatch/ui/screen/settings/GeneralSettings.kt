@@ -45,6 +45,7 @@ import me.bmax.apatch.BuildConfig
 import me.bmax.apatch.Natives
 import me.bmax.apatch.R
 import me.bmax.apatch.ui.component.ExpressiveCard
+import me.bmax.apatch.ui.component.SegmentedControl
 import me.bmax.apatch.ui.component.SplicedColumnGroup
 import me.bmax.apatch.ui.component.ToggleSettingCard
 import me.bmax.apatch.ui.component.UpdateDialog
@@ -61,8 +62,8 @@ fun GeneralSettingsContent(
     onSELinuxModeChange: (String) -> Unit,
     isGlobalNamespaceEnabled: Boolean,
     onGlobalNamespaceChange: (Boolean) -> Unit,
-    isMagicMountEnabled: Boolean,
-    onMagicMountChange: (Boolean) -> Unit,
+    mountMode: Int,
+    onMountModeChange: (Int) -> Unit,
     snackBarHost: SnackbarHostState,
     flat: Boolean = false,
     highlightKey: String? = null,
@@ -86,8 +87,11 @@ fun GeneralSettingsContent(
     val globalNamespaceTitle = stringResource(id = R.string.settings_global_namespace_mode)
     val globalNamespaceSummary = stringResource(id = R.string.settings_global_namespace_mode_summary)
 
-    val magicMountTitle = stringResource(id = R.string.settings_magic_mount)
-    val magicMountSummary = stringResource(id = R.string.settings_magic_mount_summary)
+    val mountModeTitle = stringResource(id = R.string.settings_mount_mode)
+    val mountModeSummary = stringResource(id = R.string.settings_magic_mount_summary)
+    val mountModeMagic = stringResource(id = R.string.settings_mount_mode_magic)
+    val mountModeOverlay = stringResource(id = R.string.settings_mount_mode_overlayfs)
+    val mountModeDisabled = stringResource(id = R.string.settings_mount_mode_disabled)
 
     val selinuxModeTitle = stringResource(id = R.string.settings_selinux_mode)
     val selinuxModeSummary = stringResource(id = R.string.settings_selinux_mode_summary)
@@ -462,18 +466,34 @@ fun GeneralSettingsContent(
             )
         }
 
-        item(key = "general_magic_mount", visible = kPatchReady && aPatchReady) {
-            ToggleSettingCard(
-            flat = flat,
-            icon = Icons.Filled.FolderSpecial,
-                title = magicMountTitle,
-                description = magicMountSummary,
-                checked = isMagicMountEnabled,
-                onCheckedChange = {
-                    setMagicMountEnabled(it)
-                    onMagicMountChange(it)
-                }
-            )
+        item(key = "general_mount_mode", visible = kPatchReady && aPatchReady) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 4.dp)
+            ) {
+                Text(
+                    text = mountModeTitle,
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.padding(bottom = 2.dp)
+                )
+                Text(
+                    text = mountModeSummary,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
+                SegmentedControl(
+                    items = listOf(mountModeMagic, mountModeOverlay, mountModeDisabled),
+                    selectedIndex = mountMode,
+                    useFixedWidth = true,
+                    itemWidth = 110.dp,
+                    onItemSelection = { index ->
+                        setMountMode(index)
+                        onMountModeChange(index)
+                    }
+                )
+            }
         }
 
         item(key = "general_alt_icon") {

@@ -103,6 +103,7 @@ class APApplication : Application(), Thread.UncaughtExceptionHandler, ImageLoade
         private const val NEED_REBOOT_FILE = "/dev/.need_reboot"
         const val GLOBAL_NAMESPACE_FILE = "/data/adb/.global_namespace_enable"
         const val MAGIC_MOUNT_FILE = "/data/adb/.magic_mount_enable"
+        const val OVERLAYFS_MOUNT_FILE = "/data/adb/.overlayfs_mount_enable"
         const val HIDE_SERVICE_FILE = "/data/adb/.hide_service_enable"
         const val HIDE_BINARY_PATH = "/data/adb/fp/bin/fpd"
         const val UMOUNT_SERVICE_FILE = "/data/adb/.umount_service_enable"

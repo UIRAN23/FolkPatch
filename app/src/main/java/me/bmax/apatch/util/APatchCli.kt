@@ -549,6 +549,46 @@ fun setMagicMountEnabled(enable: Boolean) {
         }
 }
 
+fun isOverlayFsMountEnabled(): Boolean {
+    val overlayFs = SuFile(APApplication.OVERLAYFS_MOUNT_FILE)
+    overlayFs.shell = getRootShell()
+    return overlayFs.exists()
+}
+
+fun setOverlayFsMountEnabled(enable: Boolean) {
+    getRootShell().newJob().add("${if (enable) "touch" else "rm -rf"} ${APApplication.OVERLAYFS_MOUNT_FILE}")
+        .submit { result ->
+            Log.i(TAG, "setOverlayFsMountEnabled result: ${result.isSuccess} [${result.out}]")
+        }
+}
+
+/// Mount mode: 0 = disabled, 1 = magic mount, 2 = overlayfs
+fun getMountMode(): Int {
+    if (isOverlayFsMountEnabled()) return 2
+    if (isMagicMountEnabled()) return 1
+    return 0
+}
+
+fun setMountMode(mode: Int) {
+    when (mode) {
+        2 -> {
+            // Enable overlayfs, disable magic mount
+            setOverlayFsMountEnabled(true)
+            setMagicMountEnabled(false)
+        }
+        1 -> {
+            // Enable magic mount, disable overlayfs
+            setMagicMountEnabled(true)
+            setOverlayFsMountEnabled(false)
+        }
+        else -> {
+            // Disable both
+            setMagicMountEnabled(false)
+            setOverlayFsMountEnabled(false)
+        }
+    }
+}
+
 fun isHideServiceEnabled(): Boolean {
     val hideService = SuFile(APApplication.HIDE_SERVICE_FILE)
     hideService.shell = getRootShell()

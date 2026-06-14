@@ -39,7 +39,8 @@ import me.bmax.apatch.R
 import me.bmax.apatch.ui.theme.BackgroundConfig
 import me.bmax.apatch.util.getSELinuxMode
 import me.bmax.apatch.util.isGlobalNamespaceEnabled as checkGlobalNamespaceEnabled
-import me.bmax.apatch.util.isMagicMountEnabled as checkMagicMountEnabled
+import me.bmax.apatch.util.getMountMode as checkMountMode
+import me.bmax.apatch.util.setMountMode
 import me.bmax.apatch.util.ui.LocalSnackbarHost
 import me.bmax.apatch.util.ui.NavigationBarsSpacer
 
@@ -52,14 +53,14 @@ fun GeneralSettingsScreen(navigator: DestinationsNavigator, highlightKey: String
     val aPatchReady = (state == APApplication.State.ANDROIDPATCH_INSTALLING || state == APApplication.State.ANDROIDPATCH_INSTALLED || state == APApplication.State.ANDROIDPATCH_NEED_UPDATE)
 
     var isGlobalNamespaceEnabled by rememberSaveable { mutableStateOf(false) }
-    var isMagicMountEnabled by rememberSaveable { mutableStateOf(false) }
+    var mountMode by rememberSaveable { mutableIntStateOf(0) }
     var currentSELinuxMode by rememberSaveable { mutableStateOf("Unknown") }
 
     LaunchedEffect(kPatchReady, aPatchReady) {
         if (kPatchReady && aPatchReady) {
             withContext(Dispatchers.IO) {
                 isGlobalNamespaceEnabled = checkGlobalNamespaceEnabled()
-                isMagicMountEnabled = checkMagicMountEnabled()
+                mountMode = checkMountMode()
                 currentSELinuxMode = getSELinuxMode()
             }
         }
@@ -97,8 +98,8 @@ fun GeneralSettingsScreen(navigator: DestinationsNavigator, highlightKey: String
                     onSELinuxModeChange = { currentSELinuxMode = it },
                     isGlobalNamespaceEnabled = isGlobalNamespaceEnabled,
                     onGlobalNamespaceChange = { isGlobalNamespaceEnabled = it },
-                    isMagicMountEnabled = isMagicMountEnabled,
-                    onMagicMountChange = { isMagicMountEnabled = it },
+                    mountMode = mountMode,
+                    onMountModeChange = { mountMode = it },
                     snackBarHost = snackBarHost,
                     flat = flat,
                     navigator = navigator,
