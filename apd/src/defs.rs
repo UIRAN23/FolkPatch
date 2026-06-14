@@ -25,6 +25,15 @@ pub const SUPPORTED_PARTITIONS: &[&str] = &[
     "my_vendor",
     "my_odm",
 ];
+
+// Partitions where unmounting causes crashes (Play Integrity, libpairipcore.so SIGSEGV)
+// Hybrid Mount ignores these for unmount — we do the same
+pub const IGNORE_UMOUNT_PATHS: &[&str] = &[
+    "/vendor/lib",
+    "/vendor/lib64",
+    "/system/lib",
+    "/system/lib64",
+];
 pub const HIDE_SERVICE_FILE: &str = concatcp!(ADB_DIR, ".hide_service_enable");
 pub const HIDE_BINARY_PATH: &str = concatcp!(ADB_DIR, "fp/bin/fpd");
 pub const UMOUNT_SERVICE_FILE: &str = concatcp!(ADB_DIR, ".umount_service_enable");

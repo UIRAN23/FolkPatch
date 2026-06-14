@@ -270,6 +270,11 @@ pub fn on_post_data_fs(superkey: Option<String>) -> Result<()> {
         return Ok(());
     }
 
+    // Unmount overlayfs before pruning modules (module dirs may be removed)
+    if let Err(e) = crate::magic_mount::unmount_all() {
+        log::error!("unmount before prune failed: {e}");
+    }
+
     if let Err(e) = module::prune_modules() {
         warn!("prune modules failed: {}", e);
     }

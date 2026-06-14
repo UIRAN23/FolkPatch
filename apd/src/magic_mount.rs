@@ -13,14 +13,14 @@ use rustix::{
     fs::{Gid, MetadataExt, Mode, Uid, chmod, chown},
     mount::{
         MountFlags, MountPropagationFlags, UnmountFlags, mount, mount_bind, mount_change,
-        mount_move, unmount,
+        mount_move, mount_remount, unmount,
     },
 };
 
 use crate::{
     defs::{
-        AP_MAGIC_MOUNT_SOURCE, DISABLE_FILE_NAME, MODULE_DIR, OVERLAYFS_WORK_DIR,
-        REMOVE_FILE_NAME, SKIP_MOUNT_FILE_NAME, SUPPORTED_PARTITIONS,
+        AP_MAGIC_MOUNT_SOURCE, DISABLE_FILE_NAME, IGNORE_UMOUNT_PATHS, MODULE_DIR,
+        OVERLAYFS_WORK_DIR, REMOVE_FILE_NAME, SKIP_MOUNT_FILE_NAME, SUPPORTED_PARTITIONS,
     },
     magic_mount::NodeFileType::{Directory, RegularFile, Symlink, Whiteout},
     restorecon::{lgetfilecon, lsetfilecon},
@@ -29,6 +29,52 @@ use crate::{
 
 const REPLACE_DIR_FILE_NAME: &str = ".replace";
 const REPLACE_DIR_XATTR: &str = "trusted.overlay.opaque";
+
+// ─────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────
+
+/// Remount a bind-mounted path as read-only (non-fatal on failure).
+fn try_remount_readonly(target: &Path) {
+    if let Err(e) = mount_remount(target, MountFlags::RDONLY | MountFlags::BIND, "") {
+        log::debug!("remount readonly failed for {}: {}", target.display(), e);
+    }
+}
+
+/// Clone SELinux context from src to dst (non-fatal on failure).
+fn clone_selinux_context(src: &Path, dst: &Path) {
+    if let Ok(ctx) = lgetfilecon(src) {
+        if let Err(e) = lsetfilecon(dst, &ctx) {
+            log::debug!(
+                "selinux context clone failed for {} -> {}: {}",
+                src.display(),
+                dst.display(),
+                e
+            );
+        }
+    }
+}
+
+/// Check if a path should be ignored for unmount (e.g. /system/lib*).
+fn should_ignore_umount(path: &Path) -> bool {
+    let path_str = path.to_string_lossy();
+    IGNORE_UMOUNT_PATHS.iter().any(|p| path_str.starts_with(p))
+}
+
+/// Case-insensitive check if a directory contains a marker file.
+fn dir_contains_marker_case_insensitive(dir: &Path, marker: &str) -> bool {
+    let marker_lower = marker.to_lowercase();
+    dir.read_dir()
+        .ok()
+        .map(|entries| {
+            entries.flatten().any(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(&marker_lower)
+            })
+        })
+        .unwrap_or(false)
+}
 
 // ─────────────────────────────────────────────────────────────
 // Mount mode: Magic Mount (bind + tmpfs) or OverlayFS
@@ -227,11 +273,14 @@ fn collect_module_files() -> Result<Option<Node>> {
             continue;
         }
 
-        if entry.path().join(DISABLE_FILE_NAME).exists()
-            || entry.path().join(REMOVE_FILE_NAME).exists()
-            || entry.path().join(SKIP_MOUNT_FILE_NAME).exists()
+        // Case-insensitive block markers: disable, remove, skip_mount, mount_error
+        let module_dir_path = entry.path();
+        if dir_contains_marker_case_insensitive(&module_dir_path, DISABLE_FILE_NAME)
+            || dir_contains_marker_case_insensitive(&module_dir_path, REMOVE_FILE_NAME)
+            || dir_contains_marker_case_insensitive(&module_dir_path, SKIP_MOUNT_FILE_NAME)
+            || dir_contains_marker_case_insensitive(&module_dir_path, "mount_error")
         {
-            log::debug!("skipped module {id}, due to disable/remove/skip_mount");
+            log::debug!("skipped module {id}, due to block marker");
             continue;
         }
 
@@ -382,6 +431,7 @@ fn mount_mirror<P: AsRef<Path>, WP: AsRef<Path>>(
             work_dir_path.display()
         );
         fs::File::create(&work_dir_path)?;
+        clone_selinux_context(&path, &work_dir_path);
         mount_bind(&path, &work_dir_path)?;
     } else if file_type.is_dir() {
         log::debug!(
@@ -549,6 +599,7 @@ fn do_magic_mount<P: AsRef<Path>, WP: AsRef<Path>>(
                     work_dir_path.display()
                 );
                 mount_bind(module_path, target_path)?;
+                try_remount_readonly(target_path);
             } else {
                 bail!("cannot mount root file {}!", path.display());
             }
@@ -561,6 +612,7 @@ fn do_magic_mount<P: AsRef<Path>, WP: AsRef<Path>>(
                     work_dir_path.display()
                 );
                 clone_symlink(module_path, &work_dir_path)?;
+                clone_selinux_context(module_path, &work_dir_path);
             } else {
                 bail!("cannot mount root symlink {}!", path.display());
             }
@@ -596,6 +648,7 @@ fn do_magic_mount<P: AsRef<Path>, WP: AsRef<Path>>(
             }
             process_remaining_children(&path, &work_dir_path, current.children, has_tmpfs)?;
             if create_tmpfs {
+                try_remount_readonly(&work_dir_path);
                 move_tmpfs_to_target(&work_dir_path, &path)?;
             }
         }
@@ -815,12 +868,19 @@ fn unmount_overlayfs() -> Result<()> {
         let partition_name = entry.file_name();
         let Some(name) = partition_name.to_str() else { continue };
         let target = Path::new("/").join(name);
+
+        // Skip paths that are known to cause crashes when unmounted
+        if should_ignore_umount(&target) {
+            log::info!("overlayfs: skipping unmount for {} (ignore list)", name);
+            continue;
+        }
+
         let marker = target.join(".overlayfs_mounted");
 
         if marker.exists() {
             log::info!("overlayfs: unmounting {}", name);
             if let Err(e) = unmount(&target, UnmountFlags::DETACH) {
-                log::error!("overlayfs: failed to unmount {}: {}", name, e);
+                log::warn!("overlayfs: failed to unmount {}: {} (may be in use)", name, e);
             } else {
                 // Remove marker
                 fs::remove_file(&marker).ok();
