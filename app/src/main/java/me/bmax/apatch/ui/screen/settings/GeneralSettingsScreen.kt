@@ -53,7 +53,7 @@ fun GeneralSettingsScreen(navigator: DestinationsNavigator, highlightKey: String
     val aPatchReady = (state == APApplication.State.ANDROIDPATCH_INSTALLING || state == APApplication.State.ANDROIDPATCH_INSTALLED || state == APApplication.State.ANDROIDPATCH_NEED_UPDATE)
 
     var isGlobalNamespaceEnabled by rememberSaveable { mutableStateOf(false) }
-    var mountMode by rememberSaveable { mutableIntStateOf(0) }
+    var mountMode by rememberSaveable { mutableStateOf(0) }
     var currentSELinuxMode by rememberSaveable { mutableStateOf("Unknown") }
 
     LaunchedEffect(kPatchReady, aPatchReady) {

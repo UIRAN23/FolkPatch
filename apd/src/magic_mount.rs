@@ -254,7 +254,8 @@ fn collect_module_files() -> Result<Option<Node>> {
                 continue;
             }
             let dir_name = dir_entry.file_name();
-            let Some(dir_str) = dir_entry.file_name().to_str() else { continue };
+            let dir_name_os = dir_entry.file_name();
+            let Some(dir_str) = dir_name_os.to_str() else { continue };
 
             // Skip system/ — already handled above
             if dir_str == "system" {
@@ -760,12 +761,13 @@ fn do_overlayfs_mount() -> Result<()> {
         );
         log::debug!("overlayfs: options = {}", options);
 
+        let c_options = std::ffi::CString::new(options)?;
         mount(
             "overlay",
             &target,
             "overlay",
             MountFlags::empty(),
-            Some(&std::ffi::CString::new(options.clone())?),
+            Some(&c_options),
         )
         .with_context(|| format!("overlayfs mount failed for {}", partition_name))?;
 
