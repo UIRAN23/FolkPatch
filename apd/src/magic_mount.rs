@@ -767,7 +767,7 @@ fn do_overlayfs_mount() -> Result<()> {
             &target,
             "overlay",
             MountFlags::empty(),
-            Some(&c_options),
+            Some(&*c_options),
         )
         .with_context(|| format!("overlayfs mount failed for {}", partition_name))?;
 
