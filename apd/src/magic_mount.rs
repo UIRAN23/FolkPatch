@@ -686,6 +686,15 @@ fn collect_overlayfs_partitions() -> Result<Option<HashMap<String, Vec<(String, 
 /// Mount overlayfs for all collected partitions.
 /// For each partition, we stack all module directories as lowerdirs.
 fn do_overlayfs_mount() -> Result<()> {
+    // Verify overlayfs is supported by kernel
+    if !Path::new("/proc/filesystems").exists()
+        || !fs::read_to_string("/proc/filesystems")
+            .map(|s| s.contains("overlay"))
+            .unwrap_or(false)
+    {
+        bail!("overlayfs not supported by kernel! Aborting.");
+    }
+
     let partitions = match collect_overlayfs_partitions()? {
         Some(p) => p,
         None => {
@@ -724,11 +733,17 @@ fn do_overlayfs_mount() -> Result<()> {
         ensure_dir_exists(&upper_dir)?;
         ensure_dir_exists(&work_dir)?;
 
-        // Build lowerdir string: real partition first, then module dirs (first = highest priority)
-        let mut lowerdirs = vec![target.to_string_lossy().to_string()];
-        for (_, module_path) in module_dirs.iter().rev() {
-            lowerdirs.push(module_path.to_string_lossy().to_string());
-        }
+        // Build lowerdir string.
+        // In overlayfs, the FIRST lowerdir has highest priority.
+        // Module files should override system files, so module dirs go first.
+        // Order: last module (highest priority) → ... → first module → real partition (lowest)
+        let mut lowerdirs: Vec<String> = module_dirs
+            .iter()
+            .rev()
+            .map(|(_, p)| p.to_string_lossy().to_string())
+            .collect();
+        // Real partition is always last = lowest priority
+        lowerdirs.push(target.to_string_lossy().to_string());
         let lowerdir_str = lowerdirs.join(":");
 
         let options = format!(
