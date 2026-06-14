@@ -282,13 +282,31 @@ pub fn on_post_data_fs(superkey: Option<String>) -> Result<()> {
     if module::load_sepolicy_rule().is_err() {
         warn!("load sepolicy.rule failed");
     }
-    if Path::new(defs::MAGIC_MOUNT_FILE).exists() {
-        info!("Magic Mount mode enabled");
-        if let Err(e) = crate::magic_mount::magic_mount() {
-            log::error!("Magic Mount failed: {}", e);
+    // Mount mode priority:
+    // 1. OverlayFS flag (.overlayfs_mount_enable) → OverlayFS
+    // 2. Magic Mount flag (.magic_mount_enable) → Magic Mount (bind + tmpfs)
+    // 3. Neither flag → try metamodule mount script
+    let mount_mode = crate::magic_mount::MountMode::detect();
+    match mount_mode {
+        crate::magic_mount::MountMode::OverlayFs => {
+            info!("OverlayFS mount mode enabled");
+            if let Err(e) = crate::magic_mount::mount_modules() {
+                log::error!("OverlayFS mount failed: {e}");
+            }
         }
-    } else {
-        info!("Magic Mount disabled");
+        crate::magic_mount::MountMode::Magic => {
+            info!("Magic Mount mode enabled");
+            if let Err(e) = crate::magic_mount::mount_modules() {
+                log::error!("Magic Mount failed: {e}");
+            }
+        }
+    }
+
+    // If no flag files exist at all, fall back to metamodule
+    if !Path::new(defs::MAGIC_MOUNT_FILE).exists()
+        && !Path::new(defs::OVERLAYFS_MOUNT_FILE).exists()
+    {
+        info!("No mount flag set, trying metamodule mount");
         if let Err(e) = metamodule::exec_mount_script(module_dir) {
             warn!("execute metamodule mount failed: {e}");
         }

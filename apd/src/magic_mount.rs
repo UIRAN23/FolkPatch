@@ -19,8 +19,8 @@ use rustix::{
 
 use crate::{
     defs::{
-        AP_MAGIC_MOUNT_SOURCE, DISABLE_FILE_NAME, MODULE_DIR, REMOVE_FILE_NAME,
-        SKIP_MOUNT_FILE_NAME,
+        AP_MAGIC_MOUNT_SOURCE, DISABLE_FILE_NAME, MODULE_DIR, OVERLAYFS_WORK_DIR,
+        REMOVE_FILE_NAME, SKIP_MOUNT_FILE_NAME, SUPPORTED_PARTITIONS,
     },
     magic_mount::NodeFileType::{Directory, RegularFile, Symlink, Whiteout},
     restorecon::{lgetfilecon, lsetfilecon},
@@ -29,6 +29,35 @@ use crate::{
 
 const REPLACE_DIR_FILE_NAME: &str = ".replace";
 const REPLACE_DIR_XATTR: &str = "trusted.overlay.opaque";
+
+// ─────────────────────────────────────────────────────────────
+// Mount mode: Magic Mount (bind + tmpfs) or OverlayFS
+// ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MountMode {
+    Magic,
+    OverlayFs,
+}
+
+impl MountMode {
+    /// Detect preferred mount mode from flag files.
+    /// Priority: overlayfs flag > magic mount flag > default (magic)
+    pub fn detect() -> Self {
+        if Path::new(crate::defs::OVERLAYFS_MOUNT_FILE).exists() {
+            MountMode::OverlayFs
+        } else if Path::new(crate::defs::MAGIC_MOUNT_FILE).exists() {
+            MountMode::Magic
+        } else {
+            // Default to magic mount if no flag set
+            MountMode::Magic
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Node tree types
+// ─────────────────────────────────────────────────────────────
 
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
 enum NodeFileType {
@@ -159,11 +188,28 @@ impl Node {
     }
 }
 
+// ─────────────────────────────────────────────────────────────
+// Module file collection — supports arbitrary directories
+// ─────────────────────────────────────────────────────────────
+
+/// Check if a directory name is a supported partition that exists on the device
+fn is_supported_partition(name: &str) -> bool {
+    if !SUPPORTED_PARTITIONS.contains(&name) {
+        return false;
+    }
+    // Verify the target mount point exists on the device
+    let target = Path::new("/").join(name);
+    target.is_dir() || target.is_symlink()
+}
+
+/// Collect module files from a module directory.
+/// Now supports arbitrary partition directories (odm/, vendor/, etc.) at the module root,
+/// not just system/.
 fn collect_module_files() -> Result<Option<Node>> {
     let mut root = Node::new_root("");
     let mut system = Node::new_root("system");
     let module_root = Path::new(MODULE_DIR);
-    let mut has_file = false;
+    let mut has_any_file = false;
 
     log::debug!("begin collect module files: {}", module_root.display());
 
@@ -189,18 +235,83 @@ fn collect_module_files() -> Result<Option<Node>> {
             continue;
         }
 
-        let mod_system = entry.path().join("system");
+        let module_path = entry.path();
+        let mut module_has_file = false;
 
-        if !mod_system.is_dir() {
-            continue;
+        // ── Collect from system/ (legacy, always supported) ──
+        let mod_system = module_path.join("system");
+        if mod_system.is_dir() {
+            log::debug!("collecting system/ for module {id}");
+            let system_has = system.collect_module_files(&mod_system)?;
+            module_has_file |= system_has;
         }
 
-        log::debug!("collecting {}", entry.path().display());
+        // ── Collect from arbitrary partition directories at module root ──
+        // e.g. module/odm/, module/vendor/, module/product/, etc.
+        for entry_result in module_path.read_dir()? {
+            let Ok(dir_entry) = entry_result else { continue };
+            if !dir_entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let dir_name = dir_entry.file_name();
+            let Some(dir_str) = dir_entry.file_name().to_str() else { continue };
 
-        has_file |= system.collect_module_files(mod_system)?;
+            // Skip system/ — already handled above
+            if dir_str == "system" {
+                continue;
+            }
+
+            // Skip special directories
+            if dir_str.starts_with('.') || dir_str == "install_scripts" {
+                continue;
+            }
+
+            // Check if this is a supported partition on the device
+            if !is_supported_partition(dir_str) {
+                log::debug!(
+                    "skipping directory {}/{} — not a supported partition on this device",
+                    id, dir_str
+                );
+                continue;
+            }
+
+            let partition_path = module_path.join(dir_str);
+            log::debug!("collecting {}/ for module {id}", dir_str);
+
+            // For non-system partitions, create a node under root
+            // e.g. module/odm/ → /odm/
+            let mut partition_node = Node::new_root(dir_str);
+            let partition_has = partition_node.collect_module_files(&partition_path)?;
+            module_has_file |= partition_has;
+
+            if partition_has {
+                // Insert into root children (or merge with existing)
+                match root.children.entry(dir_str.to_string()) {
+                    Entry::Occupied(mut existing) => {
+                        // Merge children from multiple modules targeting same partition
+                        let existing_node = existing.get_mut();
+                        for (child_name, child_node) in partition_node.children {
+                            existing_node.children.entry(child_name).or_insert(child_node);
+                        }
+                    }
+                    Entry::Vacant(vacant) => {
+                        vacant.insert(partition_node);
+                    }
+                }
+            }
+        }
+
+        if module_has_file {
+            log::debug!("module {id} has mountable files", );
+        }
+
+        has_any_file |= module_has_file;
     }
 
-    if has_file {
+    if has_any_file {
+        // Handle built-in partitions that were inside system/
+        // (vendor, system_ext, product, odm, oem inside system/)
+        // These get promoted to root level if they exist as real partitions
         const BUILTIN_PARTITIONS: [(&str, bool); 5] = [
             ("vendor", true),
             ("system_ext", true),
@@ -215,7 +326,18 @@ fn collect_module_files() -> Result<Option<Node>> {
             if path_of_root.is_dir() && (!require_symlink || path_of_system.is_symlink()) {
                 let name = partition.to_string();
                 if let Some(node) = system.children.remove(&name) {
-                    root.children.insert(name, node);
+                    // If we already have this partition from root-level collection, merge
+                    match root.children.entry(name.clone()) {
+                        Entry::Occupied(mut existing) => {
+                            let existing_node = existing.get_mut();
+                            for (child_name, child_node) in node.children {
+                                existing_node.children.entry(child_name).or_insert(child_node);
+                            }
+                        }
+                        Entry::Vacant(vacant) => {
+                            vacant.insert(node);
+                        }
+                    }
                 }
             }
         }
@@ -226,6 +348,10 @@ fn collect_module_files() -> Result<Option<Node>> {
         Ok(None)
     }
 }
+
+// ─────────────────────────────────────────────────────────────
+// Magic Mount (bind + tmpfs overlay)
+// ─────────────────────────────────────────────────────────────
 
 fn clone_symlink<Src: AsRef<Path>, Dst: AsRef<Path>>(src: Src, dst: Dst) -> Result<()> {
     let src_symlink = read_link(src.as_ref())?;
@@ -480,6 +606,185 @@ fn do_magic_mount<P: AsRef<Path>, WP: AsRef<Path>>(
     Ok(())
 }
 
+// ─────────────────────────────────────────────────────────────
+// OverlayFS mount
+// ─────────────────────────────────────────────────────────────
+
+/// Collect per-partition module directory lists for overlayfs.
+/// Returns: HashMap<partition_name, Vec<(module_id, partition_path_in_module>>
+fn collect_overlayfs_partitions() -> Result<Option<HashMap<String, Vec<(String, PathBuf)>>>> {
+    let module_root = Path::new(MODULE_DIR);
+    let mut partitions: HashMap<String, Vec<(String, PathBuf)>> = HashMap::new();
+
+    log::debug!("begin overlayfs collection: {}", module_root.display());
+
+    for entry in module_root.read_dir()?.flatten() {
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+
+        let id = entry.file_name().to_str().unwrap().to_string();
+
+        let prop = entry.path().join("module.prop");
+        if !prop.exists() {
+            continue;
+        }
+
+        if entry.path().join(DISABLE_FILE_NAME).exists()
+            || entry.path().join(REMOVE_FILE_NAME).exists()
+            || entry.path().join(SKIP_MOUNT_FILE_NAME).exists()
+        {
+            continue;
+        }
+
+        let module_path = entry.path();
+
+        // Scan all directories in the module
+        for dir_entry in module_path.read_dir()?.flatten() {
+            if !dir_entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let dir_name = match dir_entry.file_name().to_str() {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+
+            // Skip special directories
+            if dir_name.starts_with('.') || dir_name == "install_scripts" {
+                continue;
+            }
+
+            // Check if this is a supported partition on the device
+            if !is_supported_partition(&dir_name) {
+                continue;
+            }
+
+            let partition_source = module_path.join(&dir_name);
+            if !partition_source.is_dir() {
+                continue;
+            }
+
+            log::debug!(
+                "overlayfs: module {id} → partition {dir_name} ({})",
+                partition_source.display()
+            );
+
+            partitions
+                .entry(dir_name)
+                .or_default()
+                .push((id.clone(), partition_source));
+        }
+    }
+
+    if partitions.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(partitions))
+    }
+}
+
+/// Mount overlayfs for all collected partitions.
+/// For each partition, we stack all module directories as lowerdirs.
+fn do_overlayfs_mount() -> Result<()> {
+    let partitions = match collect_overlayfs_partitions()? {
+        Some(p) => p,
+        None => {
+            log::info!("no modules for overlayfs, skipping!");
+            return Ok(());
+        }
+    };
+
+    let work_base = PathBuf::from(OVERLAYFS_WORK_DIR);
+    ensure_dir_exists(&work_base)?;
+
+    for (partition_name, module_dirs) in &partitions {
+        let target = Path::new("/").join(partition_name);
+
+        // Skip if target doesn't exist on device
+        if !target.exists() {
+            log::warn!(
+                "overlayfs: partition {} doesn't exist on device, skipping",
+                partition_name
+            );
+            continue;
+        }
+
+        // Check if already mounted
+        if target.join(".overlayfs_mounted").exists() {
+            log::info!("overlayfs: {} already mounted, skipping", partition_name);
+            continue;
+        }
+
+        // Build overlayfs mount:
+        // lowerdir = real_partition:module1_dir:module2_dir:...
+        // upperdir = work_base/partition_name/upper
+        // workdir  = work_base/partition_name/work
+        let upper_dir = work_base.join(partition_name).join("upper");
+        let work_dir = work_base.join(partition_name).join("work");
+        ensure_dir_exists(&upper_dir)?;
+        ensure_dir_exists(&work_dir)?;
+
+        // Build lowerdir string: real partition first, then module dirs (first = highest priority)
+        let mut lowerdirs = vec![target.to_string_lossy().to_string()];
+        for (_, module_path) in module_dirs.iter().rev() {
+            lowerdirs.push(module_path.to_string_lossy().to_string());
+        }
+        let lowerdir_str = lowerdirs.join(":");
+
+        let options = format!(
+            "lowerdir={},upperdir={},workdir={}",
+            lowerdir_str,
+            upper_dir.display(),
+            work_dir.display()
+        );
+
+        log::info!(
+            "overlayfs: mounting {} with {} module(s)",
+            partition_name,
+            module_dirs.len()
+        );
+        log::debug!("overlayfs: options = {}", options);
+
+        mount(
+            "overlay",
+            &target,
+            "overlay",
+            MountFlags::empty(),
+            Some(&std::ffi::CString::new(options.clone())?),
+        )
+        .with_context(|| format!("overlayfs mount failed for {}", partition_name))?;
+
+        // Mark as mounted
+        let marker = target.join(".overlayfs_mounted");
+        fs::File::create(&marker).ok();
+
+        log::info!("overlayfs: {} mounted successfully", partition_name);
+    }
+
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────
+// Public entry points
+// ─────────────────────────────────────────────────────────────
+
+/// Main mount dispatcher. Detects mode from flag files and calls appropriate implementation.
+pub fn mount_modules() -> Result<()> {
+    let mode = MountMode::detect();
+
+    match mode {
+        MountMode::Magic => {
+            log::info!("using Magic Mount mode");
+            magic_mount()
+        }
+        MountMode::OverlayFs => {
+            log::info!("using OverlayFS mount mode");
+            do_overlayfs_mount()
+        }
+    }
+}
+
+/// Legacy magic mount entry point (used by event.rs)
 pub fn magic_mount() -> Result<()> {
     if let Some(root) = collect_module_files()? {
         log::debug!("collected: {:#?}", root);
