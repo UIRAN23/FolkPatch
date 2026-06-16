@@ -166,6 +166,21 @@ const MODULE_PARTITIONS: &[(&str, bool)] = &[
     ("product", true),
     ("odm", false),
     ("oem", false),
+    ("apex", true),
+    ("mi_ext", true),
+    ("my_bigball", true),
+    ("my_carrier", true),
+    ("my_company", true),
+    ("my_engineering", true),
+    ("my_heytap", true),
+    ("my_manifest", true),
+    ("my_preload", true),
+    ("my_product", true),
+    ("my_region", true),
+    ("my_reserve", true),
+    ("my_stock", true),
+    ("optics", true),
+    ("prism", true),
 ];
 
 fn collect_module_files() -> Result<Option<Node>> {
