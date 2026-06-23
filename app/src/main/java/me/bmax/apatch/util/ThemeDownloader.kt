@@ -272,6 +272,10 @@ class ThemeDownloader(private val context: Context) {
 
     /**
      * 下载文件（支持断点续传）
+     *
+     * 续传正确性保证：仅当服务器真正返回 206 Partial Content 时才以 append 模式续写；
+     * 若服务器忽略 Range 头返回 200（gh-proxy / gitee raw 等代理常见行为），
+     * 则先截断已有半截文件、从头覆盖写入，避免出现「半截 + 完整」拼接的损坏文件。
      */
     private suspend fun downloadFileWithRetry(
         url: String,
@@ -290,64 +294,9 @@ class ThemeDownloader(private val context: Context) {
 
         while (retryCount < MAX_RETRIES) {
             try {
-                // 获取已下载的字节数（断点续传）
-                val downloadedBytes = if (file.exists()) file.length() else 0L
-
-                // 构建请求
-                val request = Request.Builder()
-                    .url(url)
-                    .apply {
-                        if (downloadedBytes > 0) {
-                            addHeader("Range", "bytes=$downloadedBytes-")
-                        }
-                    }
-                    .build()
-
-                val response = client.newCall(request).execute()
-
-                // 处理响应
-                if (response.code !in 200..299) {
-                    throw IOException("HTTP error: ${response.code}")
-                }
-
-                val totalBytes = if (response.body?.contentLength() ?: -1L > 0) {
-                    downloadedBytes + (response.body?.contentLength() ?: 0L)
-                } else {
-                    -1L
-                }
-
-                // 写入文件
-                FileOutputStream(file, downloadedBytes > 0).use { output ->
-                    response.body?.byteStream()?.use { input ->
-                        val buffer = ByteArray(BUFFER_SIZE)
-                        var bytesRead: Long = 0
-
-                        var read: Int
-                        while (input.read(buffer).also { read = it } != -1) {
-                            output.write(buffer, 0, read)
-                            bytesRead += read
-
-                            // 计算进度
-                            val progress = if (totalBytes > 0) {
-                                (downloadedBytes + bytesRead).toFloat() / totalBytes
-                            } else {
-                                // 未知总大小时，使用已下载字节数估算
-                                0.9f // 暂时显示 90%
-                            }
-
-                            onProgress(progress.coerceIn(0f, 1f))
-
-                            // 检查是否被取消
-                            if (downloadTasks[taskId]?.isCancelled == true) {
-                                throw IOException("Download cancelled")
-                            }
-                        }
-                    }
-                }
-
+                downloadOnce(url, file, taskId, onProgress)
                 Log.d(TAG, "Download completed: ${file.absolutePath}")
                 return@withContext DownloadFileResult(true)
-
             } catch (e: Exception) {
                 lastError = describeException(e)
                 Log.w(TAG, "Download attempt ${retryCount + 1} failed: $lastError")
@@ -361,7 +310,93 @@ class ThemeDownloader(private val context: Context) {
         }
 
         Log.e(TAG, "Download failed after $MAX_RETRIES retries: $lastError")
+        // 彻底失败：清理可能不完整的残文件，避免下次续传从坏起点开始
+        runCatching { if (file.exists()) file.delete() }
         DownloadFileResult(false, lastError)
+    }
+
+    /**
+     * 执行一次下载尝试。正确处理 206 续传 / 200 全量覆盖两种情形。
+     */
+    private fun downloadOnce(
+        url: String,
+        file: File,
+        taskId: String,
+        onProgress: (Float) -> Unit
+    ) {
+        // 已下载字节数（断点续传起点）
+        val downloadedBytes = if (file.exists()) file.length() else 0L
+
+        val request = Request.Builder()
+            .url(url)
+            .apply {
+                if (downloadedBytes > 0) {
+                    addHeader("Range", "bytes=$downloadedBytes-")
+                }
+            }
+            .build()
+
+        client.newCall(request).execute().use { response ->
+            // 处理响应
+            if (response.code !in 200..299) {
+                throw IOException("HTTP error: ${response.code}")
+            }
+
+            // 关键：只有 206 才说明服务器真正按 Range 续传。
+            // 200 表示服务器忽略了 Range，返回完整内容 —— 必须从头覆盖写。
+            val resumeFromPartial = response.code == 206 && downloadedBytes > 0
+
+            // 服务器本次响应声明的剩余部分大小（206 时是剩余，200 时是整体）
+            val responseContentLength = response.body?.contentLength() ?: -1L
+
+            // 整个文件的总大小（用于进度计算）
+            val totalBytes = if (responseContentLength > 0) {
+                if (resumeFromPartial) downloadedBytes + responseContentLength else responseContentLength
+            } else {
+                -1L // 未知总大小
+            }
+
+            // 写文件：续传用 append，全量用 truncate（覆盖）
+            FileOutputStream(file, resumeFromPartial).use { output ->
+                response.body?.byteStream()?.use { input ->
+                    val buffer = ByteArray(BUFFER_SIZE)
+                    var bytesRead: Long = 0
+
+                    var read: Int
+                    while (input.read(buffer).also { read = it } != -1) {
+                        output.write(buffer, 0, read)
+                        bytesRead += read
+
+                        // 计算进度
+                        val progress = if (totalBytes > 0) {
+                            ((if (resumeFromPartial) downloadedBytes else 0L) + bytesRead).toFloat() / totalBytes
+                        } else {
+                            // 未知总大小：用已下载字节数做渐进估算，避免恒卡在某个固定值
+                            estimateUnknownProgress(bytesRead)
+                        }
+
+                        onProgress(progress.coerceIn(0f, 1f))
+
+                        // 检查是否被取消
+                        if (downloadTasks[taskId]?.isCancelled == true) {
+                            throw IOException("Download cancelled")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * 未知 Content-Length 时的进度估算：基于已下载字节数做平滑递增。
+     * 主题文件通常 < 5MB，预览图 < 500KB；用渐进曲线逼近 1.0，避免恒停在一个固定值。
+     * 公式：p = 1 - 1/(1 + bytes/256KB)，对任意大小都连续单调递增、永不超过 1。
+     */
+    private fun estimateUnknownProgress(downloaded: Long): Float {
+        if (downloaded <= 0) return 0f
+        val ref = 256.0 * 1024.0 // 256KB 作为「半程」参考量
+        val p = 1.0 - 1.0 / (1.0 + downloaded.toDouble() / ref)
+        return p.toFloat().coerceIn(0f, 0.99f)
     }
 
     /**
